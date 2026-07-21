@@ -14,6 +14,9 @@ from app.atlasclaw.agent.runner_tool.runner_llm_routing import (
     messages_satisfy_artifact_goal,
     selected_capability_ids_from_intent_plan,
 )
+from app.atlasclaw.agent.runner_tool.runner_capability_activation import (
+    CAPABILITY_ACTIVATION_TOOL_NAME,
+)
 from app.atlasclaw.agent.runner_tool.runner_tool_result_mode import normalize_tool_result_mode
 from app.atlasclaw.agent.runner_tool.runner_tool_messages import (
     extract_synthetic_tool_messages_from_next_node,
@@ -22,6 +25,7 @@ from app.atlasclaw.agent.runner_tool.runner_tool_messages import (
 )
 from app.atlasclaw.agent.runner_tool.runner_tool_projection import turn_action_requires_tool_execution
 from app.atlasclaw.agent.stream import StreamEvent
+from app.atlasclaw.agent.tool_gate_models import ToolIntentPlan
 from app.atlasclaw.core.object_actions import collect_latest_object_action_reference_update
 from app.atlasclaw.core.workspace_downloads import (
     collect_workspace_download_references_from_payloads,
@@ -191,7 +195,13 @@ class RunnerExecutionFlowStreamMixin:
                 "elapsed": round(time.monotonic() - start_time, 1),
             },
         )
-        node_iterator = self._iter_agent_nodes(agent_run).__aiter__()
+        try:
+            node_stream = self._iter_agent_nodes(agent_run, deps=deps)
+        except TypeError as exc:
+            if "unexpected keyword argument 'deps'" not in str(exc):
+                raise
+            node_stream = self._iter_agent_nodes(agent_run)
+        node_iterator = node_stream.__aiter__()
         first_node: Any | None = None
         first_node_task = asyncio.create_task(node_iterator.__anext__())
         while not first_node_seen:
@@ -240,6 +250,19 @@ class RunnerExecutionFlowStreamMixin:
             if deps.is_aborted():
                 yield StreamEvent.lifecycle_aborted()
                 break
+
+            if isinstance(getattr(deps, "extra", None), dict):
+                raw_plan = deps.extra.get("tool_intent_plan")
+                if isinstance(raw_plan, dict):
+                    try:
+                        refreshed_plan = ToolIntentPlan.model_validate(raw_plan)
+                    except Exception:
+                        refreshed_plan = None
+                    if refreshed_plan is not None:
+                        state["tool_intent_plan"] = refreshed_plan
+                        state["tool_execution_required"] = (
+                            turn_action_requires_tool_execution(refreshed_plan)
+                        )
 
             runtime_current_messages = self.history.normalize_messages(agent_run.all_messages())
             runtime_current_messages = self.history.prune_summary_messages(runtime_current_messages)
@@ -563,7 +586,9 @@ class RunnerExecutionFlowStreamMixin:
             executed_tool_names = list(state.get("executed_tool_names") or [])
             for event in tool_dispatch.events:
                 if event.type == "tool" and event.phase == "end" and str(event.tool or "").strip():
-                    executed_tool_names.append(str(event.tool).strip())
+                    executed_name = str(event.tool).strip()
+                    if executed_name != CAPABILITY_ACTIVATION_TOOL_NAME:
+                        executed_tool_names.append(executed_name)
             if executed_tool_names:
                 state["executed_tool_names"] = executed_tool_names
             for event in tool_dispatch.events:
@@ -1220,6 +1245,12 @@ class RunnerExecutionFlowStreamMixin:
     ) -> tuple[str, str]:
         if attempt <= 1:
             return "Analyzing request.", "initial_request"
+        if (
+            tool_call_summaries
+            and str(tool_call_summaries[-1].get("name", "") or "").strip()
+            == CAPABILITY_ACTIVATION_TOOL_NAME
+        ):
+            return "Continuing with the selected capability.", "capability_selected"
         if tool_call_summaries:
             return "Re-entering model loop with tool evidence.", "tool_result_continuation"
         return "Re-entering model loop to continue reasoning.", "reasoning_retry"

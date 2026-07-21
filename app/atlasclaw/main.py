@@ -40,6 +40,10 @@ from app.atlasclaw.session.queue import SessionQueue
 from app.atlasclaw.session.router import SessionManagerRouter
 from app.atlasclaw.skills.registry import SkillRegistry
 from app.atlasclaw.tools.registration import register_builtin_tools
+from app.atlasclaw.agent.runner_tool.runner_capability_activation import (
+    DYNAMIC_TOOL_FILTER_MARKER,
+    prepare_runtime_tools,
+)
 from app.atlasclaw.tools.catalog import ToolProfile
 from app.atlasclaw.agent.runner import AgentRunner
 from app.atlasclaw.agent.prompt_builder import PromptBuilder, PromptBuilderConfig
@@ -506,7 +510,9 @@ async def lifespan(app: FastAPI):
             model_instance,
             deps_type=SkillDeps,
             system_prompt=agent_cfg.system_prompt or "You are an assistant.",
+            prepare_tools=prepare_runtime_tools,
         )
+        setattr(built_agent, DYNAMIC_TOOL_FILTER_MARKER, True)
         _skill_registry.register_to_agent(built_agent)
         return built_agent
 

@@ -706,6 +706,7 @@ def build_capability_index(config, capability_index: list[dict]) -> str:
         "",
         "Capabilities are listed as compact metadata only to save context tokens.",
         "Detailed skill instructions are loaded after an authorized skill is selected for execution.",
+        "Chat directly; otherwise call `activate_capability` with the exact ID.",
         "Format: `capability_id | name | description | provider/artifact/tools | locator`",
         "",
     ]

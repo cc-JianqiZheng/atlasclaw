@@ -13,6 +13,9 @@ from app.atlasclaw.core.provider_skill_capability import (
     runtime_tool_provider_skill_names,
     runtime_tool_skill_names,
 )
+from app.atlasclaw.agent.runner_tool.runner_capability_activation import (
+    CAPABILITY_ACTIVATION_TOOL_NAME,
+)
 
 
 def tool_is_coordination_support(tool: dict[str, Any]) -> bool:
@@ -281,6 +284,7 @@ def tool_required_turn_has_real_execution(
             for name in executed_tool_names
             if str(name or "").strip()
         }
+        normalized_executed.discard(CAPABILITY_ACTIVATION_TOOL_NAME)
         if normalized_executed:
             return True
 
@@ -290,7 +294,11 @@ def tool_required_turn_has_real_execution(
             for item in tool_call_summaries
             if isinstance(item, dict)
         }
-        normalized_summaries = {name for name in normalized_summaries if name}
+        normalized_summaries = {
+            name
+            for name in normalized_summaries
+            if name and name != CAPABILITY_ACTIVATION_TOOL_NAME
+        }
         if normalized_summaries and not final_messages:
             return True
 
@@ -300,7 +308,12 @@ def tool_required_turn_has_real_execution(
             continue
         role = str(message.get("role", "") or "").strip().lower()
         if role in {"tool", "toolresult", "tool_result"}:
-            if str(message.get("tool_name", "") or message.get("name", "")).strip():
+            tool_name = str(
+                message.get("tool_name", "") or message.get("name", "")
+            ).strip()
+            if tool_name == CAPABILITY_ACTIVATION_TOOL_NAME:
+                continue
+            if tool_name:
                 return True
             if message.get("content") is not None:
                 return True
@@ -309,7 +322,12 @@ def tool_required_turn_has_real_execution(
             for result in tool_results:
                 if not isinstance(result, dict):
                     return True
-                if str(result.get("tool_name", "") or result.get("name", "")).strip():
+                tool_name = str(
+                    result.get("tool_name", "") or result.get("name", "")
+                ).strip()
+                if tool_name == CAPABILITY_ACTIVATION_TOOL_NAME:
+                    continue
+                if tool_name:
                     return True
                 if result.get("content") is not None:
                     return True

@@ -96,9 +96,13 @@ def collect_md_skills_snapshot(deps) -> list[dict]:
 
 def collect_capability_index_snapshot(*, agent: Any, deps) -> list[dict]:
     """Build a compact capability index snapshot for prompt rendering."""
+    extra = deps.extra if isinstance(getattr(deps, "extra", None), dict) else {}
+    authorized_snapshot = extra.get("_authorized_capability_index")
+    if isinstance(authorized_snapshot, list):
+        return [dict(item) for item in authorized_snapshot if isinstance(item, dict)]
+
     capability_index: list[dict] = []
     tool_names: set[str] = set()
-    extra = deps.extra if isinstance(getattr(deps, "extra", None), dict) else {}
     provider_instances = extra.get("provider_instances")
 
     capability_index.extend(
@@ -146,6 +150,7 @@ def collect_capability_index_snapshot(*, agent: Any, deps) -> list[dict]:
                 "description": str(item.get("description", "") or "").strip(),
                 "locator": _format_tool_locator(item),
                 "provider_type": provider_type,
+                "routing_visibility": routing_visibility,
                 "artifact_types": _infer_artifact_types(
                     name=tool_name,
                     description=str(item.get("description", "") or "").strip(),
@@ -153,6 +158,9 @@ def collect_capability_index_snapshot(*, agent: Any, deps) -> list[dict]:
                     metadata=item,
                 ),
                 "declared_tool_names": [tool_name],
+                "routing_terms": _normalize_string_list(
+                    [item.get("aliases", []), item.get("keywords", []), item.get("use_when", [])]
+                ),
             }
         )
 
@@ -179,6 +187,7 @@ def collect_capability_index_snapshot(*, agent: Any, deps) -> list[dict]:
                     or "built-in"
                 ),
                 "provider_type": provider_type,
+                "routing_visibility": routing_visibility,
                 "artifact_types": _infer_artifact_types(
                     name=skill_name,
                     description=str(item.get("description", "") or "").strip(),
@@ -187,6 +196,9 @@ def collect_capability_index_snapshot(*, agent: Any, deps) -> list[dict]:
                 ),
                 "declared_tool_names": _normalize_string_list(
                     [item.get("qualified_skill_name", ""), item.get("skill_name", "")]
+                ),
+                "routing_terms": _normalize_string_list(
+                    [item.get("aliases", []), item.get("keywords", []), item.get("use_when", [])]
                 ),
             }
         )
@@ -286,6 +298,14 @@ def collect_md_skill_capability_entries(
                 ),
                 "target_capability_classes": _artifact_capability_classes(artifact_types),
                 "target_tool_names": _extract_md_executable_tool_names(item),
+                "routing_terms": _normalize_string_list(
+                    [
+                        metadata.get("aliases", []),
+                        metadata.get("keywords", []),
+                        metadata.get("triggers", []),
+                        metadata.get("use_when", []),
+                    ]
+                ),
             }
         )
     return entries
@@ -376,6 +396,14 @@ def _provider_md_skill_capability_entries(
                 ),
                 "declared_tool_names": declared_tool_names,
                 "declares_executable_tools": _metadata_declares_executable_tool(metadata),
+                "routing_terms": _normalize_string_list(
+                    [
+                        metadata.get("aliases", []),
+                        metadata.get("keywords", []),
+                        metadata.get("triggers", []),
+                        metadata.get("use_when", []),
+                    ]
+                ),
             }
         )
     return entries
@@ -448,6 +476,10 @@ def _provider_tool_capability_entries(
                 ),
                 "declared_tool_names": [tool_name],
                 "declares_executable_tools": True,
+                "routing_visibility": str(item.get("routing_visibility", "") or "").strip(),
+                "routing_terms": _normalize_string_list(
+                    [item.get("aliases", []), item.get("keywords", []), item.get("use_when", [])]
+                ),
             }
         )
     return entries

@@ -23,6 +23,21 @@ if TYPE_CHECKING:
 
 # Registry entries map tool names to metadata and import targets.
 _TOOL_REGISTRY: dict[str, tuple[ToolMetadata, str, str]] = {
+    "activate_capability": (
+        ToolMetadata(
+            name="activate_capability",
+            description=(
+                "Activate one exact authorized capability ID. Copy the complete ID from the "
+                "Capabilities list, including its tool:, skill:, or provider_skill: prefix"
+            ),
+            group="catalog",
+            capability_class="atlasclaw_capability_activation",
+            routing_visibility="internal",
+            coordination_only=True,
+        ),
+        "app.atlasclaw.agent.runner_tool.runner_capability_activation",
+        "activate_capability_tool",
+    ),
     # Filesystem tools
     "read": (
         ToolMetadata(

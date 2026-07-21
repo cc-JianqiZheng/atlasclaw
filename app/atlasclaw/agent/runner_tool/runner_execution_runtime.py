@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager, nullcontext
+import json
+from types import SimpleNamespace
 from typing import Any, AsyncIterator, Optional
 
 from app.atlasclaw.agent.context_window_guard import ContextWindowInfo, resolve_context_window_info
@@ -13,8 +15,22 @@ from app.atlasclaw.agent.runner_tool.runner_agent_override import (
 )
 from app.atlasclaw.core.deps import SkillDeps
 from app.atlasclaw.core.trace import bind_trace_context, resolve_trace_context
+from app.atlasclaw.agent.runner_tool.runner_capability_activation import (
+    CAPABILITY_ACTIVATION_TOOL_NAME,
+    DYNAMIC_TOOL_FILTER_MARKER,
+    activate_capability_tool,
+)
 
 class RunnerExecutionRuntimeMixin:
+    @staticmethod
+    def _runtime_model_settings(agent: Any) -> Optional[dict[str, Any]]:
+        """Disable optional DeepSeek thinking on latency-sensitive runtime turns."""
+        model = getattr(agent, "model", None)
+        model_name = str(getattr(model, "model_name", "") or "").strip().lower()
+        if model_name.startswith("deepseek-v4-"):
+            return {"extra_body": {"thinking": {"type": "disabled"}}}
+        return None
+
     async def _resolve_runtime_agent(
         self,
         session_key: str,
@@ -187,10 +203,12 @@ class RunnerExecutionRuntimeMixin:
         override_tool_names = normalize_allowed_tool_names(
             extra.get("runtime_allowed_tool_names") if isinstance(extra, dict) else None
         )
-        override_tools = resolve_override_tools(
-            agent=agent,
-            allowed_tool_names=override_tool_names,
-        )
+        override_tools = None
+        if not bool(getattr(agent, DYNAMIC_TOOL_FILTER_MARKER, False)):
+            override_tools = resolve_override_tools(
+                agent=agent,
+                allowed_tool_names=override_tool_names,
+            )
         if callable(override_factory) and system_prompt:
             override_cm = nullcontext()
             override_candidates = []
@@ -214,13 +232,20 @@ class RunnerExecutionRuntimeMixin:
         else:
             override_cm = nullcontext()
 
+        iter_kwargs: dict[str, Any] = {
+            "deps": deps,
+            "message_history": message_history,
+        }
+        model_settings = self._runtime_model_settings(agent)
+        if model_settings is not None:
+            iter_kwargs["model_settings"] = model_settings
+
         if hasattr(override_cm, "__aenter__"):
             with bind_trace_context(trace_context):
                 async with override_cm:
                     async with agent.iter(
                         user_message,
-                        deps=deps,
-                        message_history=message_history,
+                        **iter_kwargs,
                     ) as agent_run:
                         yield agent_run
             return
@@ -229,13 +254,13 @@ class RunnerExecutionRuntimeMixin:
             with override_cm:
                 async with agent.iter(
                     user_message,
-                    deps=deps,
-                    message_history=message_history,
+                    **iter_kwargs,
                 ) as agent_run:
                     yield agent_run
     async def _iter_agent_nodes(
         self,
         agent_run: Any,
+        deps: SkillDeps | None = None,
     ) -> AsyncIterator[Any]:
         next_fn = getattr(agent_run, "next", None)
         next_node = getattr(agent_run, "next_node", None)
@@ -245,6 +270,44 @@ class RunnerExecutionRuntimeMixin:
                 node_type = type(node).__name__.lower()
                 if node_type == "end":
                     return
+                if deps is not None and self._is_call_tools_node(node):
+                    for tool_call in self.runtime_events.collect_tool_calls(node):
+                        if isinstance(tool_call, dict):
+                            tool_name = str(
+                                tool_call.get("name", tool_call.get("tool_name", "")) or ""
+                            ).strip()
+                            raw_args = tool_call.get("args", tool_call.get("arguments", {}))
+                        else:
+                            tool_name = str(
+                                getattr(
+                                    tool_call,
+                                    "tool_name",
+                                    getattr(tool_call, "name", ""),
+                                )
+                                or ""
+                            ).strip()
+                            raw_args = getattr(
+                                tool_call,
+                                "args",
+                                getattr(tool_call, "arguments", {}),
+                            )
+                        if tool_name != CAPABILITY_ACTIVATION_TOOL_NAME:
+                            continue
+                        if isinstance(raw_args, str):
+                            try:
+                                raw_args = json.loads(raw_args)
+                            except json.JSONDecodeError:
+                                raw_args = {}
+                        capability_id = (
+                            str(raw_args.get("capability_id", "") or "").strip()
+                            if isinstance(raw_args, dict)
+                            else ""
+                        )
+                        if capability_id:
+                            await activate_capability_tool(
+                                SimpleNamespace(deps=deps),
+                                capability_id,
+                            )
                 following_node = await next_fn(node)
                 try:
                     setattr(node, "_atlas_next_node", following_node)

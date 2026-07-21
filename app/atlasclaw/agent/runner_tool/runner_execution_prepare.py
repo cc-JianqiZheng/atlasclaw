@@ -25,6 +25,12 @@ from app.atlasclaw.agent.runner_tool.runner_llm_routing import (
     resolve_artifact_goal_from_intent_plan,
     selected_capability_ids_from_intent_plan,
 )
+from app.atlasclaw.agent.runner_tool.runner_capability_activation import (
+    CAPABILITY_ACTIVATION_TOOL_NAME,
+    CAPABILITY_INDEX_KEY,
+    CAPABILITY_TOOLS_KEY,
+    rank_capability_index_for_request,
+)
 from app.atlasclaw.agent.selected_capability import (
     SELECTED_CAPABILITY_KEY,
     get_selected_capability_from_deps,
@@ -2008,6 +2014,17 @@ class RunnerExecutionPreparePhaseMixin:
                 agent=runtime_agent or self.agent,
                 deps=deps,
             )
+            if isinstance(deps.extra, dict):
+                deps.extra[CAPABILITY_INDEX_KEY] = [
+                    dict(item) for item in capability_index if isinstance(item, dict)
+                ]
+                deps.extra[CAPABILITY_TOOLS_KEY] = [
+                    dict(item) for item in available_tools if isinstance(item, dict)
+                ]
+                deps.extra["md_skills_max_file_bytes"] = int(
+                    getattr(self.prompt_builder.config, "md_skills_max_file_bytes", 262144)
+                    or 262144
+                )
             md_skills_snapshot = (
                 list(deps.extra.get("md_skills_snapshot") or [])
                 if isinstance(deps.extra, dict)
@@ -2042,6 +2059,7 @@ class RunnerExecutionPreparePhaseMixin:
             selected_tool_intent_plan = build_user_selected_tool_intent_plan(deps)
             capability_selector_intent_plan: ToolIntentPlan | None = None
             active_capability_route: str | None = None
+            planner_free_routing = False
             if selected_tool_intent_plan is not None:
                 if _selected_plan_matches_active_capability(
                     intent_plan=selected_tool_intent_plan,
@@ -2129,6 +2147,7 @@ class RunnerExecutionPreparePhaseMixin:
                 has_transcript_active_capability = bool(
                     transcript_active_provider_skill or transcript_active_skill
                 )
+                planner_free_routing = not has_transcript_active_capability
                 if has_transcript_active_capability:
                     active_capability_route = await self._select_active_capability_route_with_model(
                         agent=runtime_agent or self.agent,
@@ -2222,7 +2241,7 @@ class RunnerExecutionPreparePhaseMixin:
                     raw_user_message=user_message,
                     resolved_tool_request=tool_request_message,
                 )
-                if capability_selector_intent_plan is None:
+                if capability_selector_intent_plan is None and not planner_free_routing:
                     usage_profile_context = ""
                     usage_profile_result = await self.active_memory.recall_usage_profile_for_routing(
                         deps=deps,
@@ -2281,13 +2300,21 @@ class RunnerExecutionPreparePhaseMixin:
                     "reason": (
                         "active_capability_continuation"
                         if active_capability_route == self.ACTIVE_CAPABILITY_CONTINUE
-                        else "llm_capability_selector"
+                        else (
+                            "main_model_capability_activation"
+                            if planner_free_routing
+                            else "llm_capability_selector"
+                        )
                     ),
                     "confidence": (
-                        1.0
-                        if capability_selector_intent_plan.reason
-                        != "capability_selector_returned_no_valid_target"
-                        else 0.0
+                        0.0
+                        if capability_selector_intent_plan is None
+                        else (
+                            1.0
+                            if capability_selector_intent_plan.reason
+                            != "capability_selector_returned_no_valid_target"
+                            else 0.0
+                        )
                     ),
                     "preferred_provider_instances": (
                         list(capability_selector_intent_plan.target_provider_instances)
@@ -2359,6 +2386,34 @@ class RunnerExecutionPreparePhaseMixin:
                         else []
                     ),
                 )
+                if planner_free_routing:
+                    _log_step(
+                        "planner_free_routing_enabled",
+                        capability_count=len(capability_index or []),
+                    )
+            if isinstance(deps.extra, dict):
+                deps.extra["planner_free_routing"] = bool(planner_free_routing)
+                if planner_free_routing:
+                    capability_index = rank_capability_index_for_request(
+                        list(capability_index or []),
+                        user_message,
+                        max_count=int(
+                            getattr(
+                                self.prompt_builder.config,
+                                "capability_index_max_count",
+                                20,
+                            )
+                            or 20
+                        ),
+                    )
+                    deps.extra[CAPABILITY_INDEX_KEY] = [
+                        dict(item) for item in capability_index if isinstance(item, dict)
+                    ]
+                    _log_step(
+                        "capability_index_compressed",
+                        selected_count=len(capability_index),
+                        method="declared_metadata_overlap",
+                    )
             ranking_trace = {
                 "status": "capability_selector",
                 "reason": str(metadata_candidates.get("reason", "") or "capability_selector"),
@@ -2568,6 +2623,24 @@ class RunnerExecutionPreparePhaseMixin:
                 intent_plan=tool_intent_plan,
             )
             runtime_visible_tools = list(available_tools)
+            if planner_free_routing:
+                runtime_visible_tools = [
+                    tool
+                    for tool in runtime_visible_tools
+                    if str(tool.get("name", "") or "").strip()
+                    == CAPABILITY_ACTIVATION_TOOL_NAME
+                    and bool(capability_index)
+                ]
+                tool_projection_trace = {
+                    **dict(tool_projection_trace),
+                    "enabled": True,
+                    "reason": "main_model_capability_activation",
+                    "after_count": len(runtime_visible_tools),
+                    "coordination_tools": [
+                        str(tool.get("name", "") or "").strip()
+                        for tool in runtime_visible_tools
+                    ],
+                }
             provider_instance_pruning_trace: dict[str, Any] = {}
             runtime_visible_tools, provider_instance_pruning_trace = (
                 prune_auto_selected_provider_instance_tools(
@@ -2967,6 +3040,7 @@ class RunnerExecutionPreparePhaseMixin:
                 explicit_tool_execution_target is None
                 and not tool_execution_required
                 and not bool(getattr(tool_gate_decision, "needs_tool", False))
+                and not planner_free_routing
             )
             if active_memory_allowed_for_turn:
                 # Active memory is intentionally injected only after tool
